@@ -7,11 +7,16 @@ from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from sentence_transformers import SentenceTransformer, util
 import numpy as np
+import textract  # .doc o‘qish uchun
 
-# Modelni yuklash (multilingual model, o'zbek va rus tillarini qisman qo'llab-quvvatlaydi)
-model = SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')
+# ------------------ Modelni keshlash ------------------
+@st.cache_resource
+def load_model():
+    return SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
 
-# Til uchun lug'atlar
+model = load_model()
+
+# ------------------ Lug‘atlar ------------------
 texts = {
     "uz": {
         "title": "📊 Ma'lumotlarni Taqqoslash Platformasi",
@@ -29,7 +34,7 @@ texts = {
         "select_column_input": "Tekshiriladigan fayldagi ustunni tanlang",
         "extra_columns": "Natijada ko'rsatish uchun qo'shimcha ustunlar",
         "similarity_slider": "Shakl o'xshashlik foizini tanlang (%)",
-        "semantic_slider": "Ma'no o'xshashlik foizini tanlang (%)",  # Yangi slider uchun matn
+        "semantic_slider": "Ma'no o'xshashlik foizini tanlang (%)",
         "compare_btn": "Taqqoslash",
         "results": "Natijalar",
         "download_csv": "📥 Natijani yuklab olish (.csv)",
@@ -53,7 +58,7 @@ texts = {
         "select_column_input": "Выберите столбец во входных данных",
         "extra_columns": "Дополнительные столбцы для отображения в результате",
         "similarity_slider": "Выберите процент сходства по форме (%)",
-        "semantic_slider": "Выберите процент сходства по смыслу (%)",  # Yangi slider uchun matn
+        "semantic_slider": "Выберите процент сходства по смыслу (%)",
         "compare_btn": "Сравнить",
         "results": "Результаты",
         "download_csv": "📥 Скачать результат (.csv)",
@@ -63,6 +68,7 @@ texts = {
     }
 }
 
+# ------------------ Matn normalizatsiyasi ------------------
 def normalize_text(s):
     if pd.isna(s):
         return ""
@@ -70,26 +76,32 @@ def normalize_text(s):
     apostrophes = ["’", "‘", "`", "ʻ", "‛", "´", "ˊ", "ʽ", "ʾ", "ʿ"]
     for apos in apostrophes:
         s = s.replace(apos, "'")
-    s = " ".join(s.split())
-    return s
+    return " ".join(s.split())
 
+# ------------------ DOC/DOCX o‘qish ------------------
 def read_doc_or_docx(file):
-    file_bytes = file.read()
-    file.seek(0)
-    doc = Document(BytesIO(file_bytes))
-    if doc.tables:
-        tables_data = []
-        for table in doc.tables:
-            for row in table.rows:
-                row_data = [cell.text.strip() for cell in row.cells]
-                tables_data.append(row_data)
-        df = pd.DataFrame(tables_data)
-        df.columns = df.iloc[0]
-        df = df[1:].reset_index(drop=True)
-        return df
-    full_text = [para.text.strip() for para in doc.paragraphs if para.text.strip()]
-    return pd.DataFrame(full_text, columns=["Data"])
+    if file.name.endswith(".docx"):
+        file_bytes = file.read()
+        file.seek(0)
+        doc = Document(BytesIO(file_bytes))
+        if doc.tables:
+            tables_data = []
+            for table in doc.tables:
+                for row in table.rows:
+                    row_data = [cell.text.strip() for cell in row.cells]
+                    tables_data.append(row_data)
+            df = pd.DataFrame(tables_data)
+            df.columns = df.iloc[0]
+            df = df[1:].reset_index(drop=True)
+            return df
+        full_text = [para.text.strip() for para in doc.paragraphs if para.text.strip()]
+        return pd.DataFrame(full_text, columns=["Data"])
+    else:  # .doc fayl
+        text = textract.process(file.name).decode("utf-8", errors="ignore")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return pd.DataFrame(lines, columns=["Data"])
 
+# ------------------ Fayl yuklash ------------------
 def load_file(file):
     if file.name.endswith(".xlsx"):
         return pd.read_excel(file)
@@ -98,13 +110,14 @@ def load_file(file):
     elif file.name.endswith(".doc") or file.name.endswith(".docx"):
         return read_doc_or_docx(file)
     elif file.name.endswith(".txt"):
-        text = file.read().decode("utf-8")
+        text = file.read().decode("utf-8", errors="ignore")
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         return pd.DataFrame(lines, columns=["Data"])
     else:
         st.error(current_texts["unsupported_format"])
         return None
 
+# ------------------ Word saqlash ------------------
 def df_to_word(df):
     doc = Document()
     doc.add_heading(current_texts["results"], level=1)
@@ -127,14 +140,11 @@ def df_to_word(df):
     f.seek(0)
     return f
 
-# --- Interfeys ---
-
+# ------------------ Interfeys ------------------
 lang = st.selectbox("Til / Язык", options=["O'zbekcha", "Русский"])
-
 current_texts = texts["uz"] if lang == "O'zbekcha" else texts["ru"]
 
 st.title(current_texts["title"])
-
 st.subheader(current_texts["upload_db"])
 uploaded_db = st.file_uploader(current_texts["load_db"], type=["xlsx", "csv", "doc", "docx", "txt"])
 
@@ -166,14 +176,13 @@ if uploaded_db is not None:
             input_column_to_check = st.selectbox(current_texts["select_column_input"], input_data.columns)
             extra_columns = st.multiselect(current_texts["extra_columns"], [col for col in df.columns if col != column_to_check])
 
-            similarity_threshold = st.slider(current_texts["similarity_slider"], min_value=50, max_value=100, value=80, step=1)
-            semantic_threshold = st.slider(current_texts["semantic_slider"], min_value=50, max_value=100, value=80, step=1)  # Yangi slider
+            similarity_threshold = st.slider(current_texts["similarity_slider"], 50, 100, 80, 1)
+            semantic_threshold = st.slider(current_texts["semantic_slider"], 50, 100, 80, 1)
 
 if st.button(current_texts["compare_btn"]):
     df["__norm_col__"] = df[column_to_check].apply(normalize_text)
     input_data["__norm_input__"] = input_data[input_column_to_check].apply(normalize_text)
 
-    # Embeddingsni hisoblash
     db_sentences = df[column_to_check].astype(str).unique().tolist()
     input_sentences = input_data[input_column_to_check].astype(str).tolist()
 
@@ -187,13 +196,9 @@ if st.button(current_texts["compare_btn"]):
         match_rows = df[df["__norm_col__"] == item]
         exact_match = not match_rows.empty
 
-        # Shakl o'xshashliklari
-        similar_items = []
-        for val in df["__norm_col__"].unique():
-            if fuzz.ratio(item, val) >= similarity_threshold and val != item:
-                similar_items.append(val)
+        similar_items = [val for val in df["__norm_col__"].unique()
+                         if fuzz.ratio(item, val) >= similarity_threshold and val != item]
 
-        # Ma'no o'xshashliklari (semantik)
         semantic_similar_items = []
         cos_scores = util.pytorch_cos_sim(input_embeddings[idx], db_embeddings)[0]
         for i, score in enumerate(cos_scores):
@@ -202,24 +207,19 @@ if st.button(current_texts["compare_btn"]):
 
         extra_data = {}
         for col in extra_columns:
-            if exact_match:
-                extra_data[col] = ", ".join(match_rows[col].astype(str).unique())
-            else:
-                extra_data[col] = ""
+            extra_data[col] = ", ".join(match_rows[col].astype(str).unique()) if exact_match else ""
 
         results.append({
-            current_texts.get("Kiritilgan", "Kiritilgan"): original,  # asl matn
-            current_texts.get("Mavjud", "Mavjud"): "Ha" if exact_match else "Yo'q",
-            current_texts.get("O'xshashlar", "O'xshashlar"): ", ".join(similar_items) if similar_items else "-",
-            current_texts.get("Semantik o'xshashlar", "Semantik o'xshashlar"): ", ".join(set(semantic_similar_items)) if semantic_similar_items else "-",  # Yangi ustun
+            "Kiritilgan": original,
+            "Mavjud": "Ha" if exact_match else "Yo'q",
+            "O'xshashlar": ", ".join(similar_items) if similar_items else "-",
+            "Semantik o'xshashlar": ", ".join(set(semantic_similar_items)) if semantic_similar_items else "-",
             **extra_data
         })
 
     result_df = pd.DataFrame(results)
     st.subheader(current_texts["results"])
     st.dataframe(result_df)
-
-    # Yuklab olish tugmalari
 
     csv = result_df.to_csv(index=False).encode('utf-8')
     st.download_button(current_texts["download_csv"], csv, "natijalar.csv", "text/csv")
